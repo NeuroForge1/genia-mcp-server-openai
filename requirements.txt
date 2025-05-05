@@ -3,3 +3,5 @@ uvicorn[standard]
 modelcontextprotocol
 openai
 python-dotenv
+
+sse-starlette
