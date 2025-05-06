@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 import logging
 import base64
 import tempfile
+import subprocess # Import subprocess for ffmpeg
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -42,6 +43,36 @@ app = FastAPI(
     title="GENIA Simplified MCP Server - OpenAI",
     description="Servidor simplificado para interactuar con OpenAI (Chat & Whisper) vía SSE.",
 )
+
+# --- Helper Function for Conversion ---
+def convert_ogg_to_wav(input_path: str, output_path: str) -> bool:
+    """Converts an OGG file to WAV using ffmpeg."""
+    try:
+        command = [
+            "ffmpeg",
+            "-i", input_path,
+            "-vn",  # No video
+            "-acodec", "pcm_s16le", # Standard WAV codec
+            "-ar", "16000", # Standard sample rate for Whisper
+            "-ac", "1", # Mono channel
+            output_path
+        ]
+        logger.info(f"Ejecutando comando ffmpeg: {	 	'.join(command)}")
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        logger.info(f"Conversión a WAV exitosa: {output_path}")
+        logger.debug(f"ffmpeg stdout: {result.stdout}")
+        logger.debug(f"ffmpeg stderr: {result.stderr}")
+        return True
+    except FileNotFoundError:
+        logger.error("Error: ffmpeg no encontrado. Asegúrate de que esté instalado y en el PATH.")
+        return False
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error durante la conversión con ffmpeg: {e}")
+        logger.error(f"ffmpeg stderr: {e.stderr}")
+        return False
+    except Exception as e:
+        logger.error(f"Error inesperado durante la conversión a WAV: {e}")
+        return False
 
 # --- SSE Event Generator ---
 async def openai_event_generator(request_message: SimpleMessage):
@@ -100,8 +131,12 @@ async def openai_event_generator(request_message: SimpleMessage):
 
         elif capability == "transcribe_audio":
             logger.info("Procesando capacidad: transcribe_audio")
-            audio_path = None # Initialize audio_path
-            temp_audio_file_created = False # Flag to track if temp file was created
+            ogg_path = None
+            wav_path = None
+            temp_ogg_created = False
+            temp_wav_created = False
+            file_to_transcribe_path = None
+            file_to_transcribe_name = None
             try:
                 # Get parameters safely
                 params = request_message.metadata.get("parameters", {}) if request_message.metadata else {}
@@ -110,56 +145,70 @@ async def openai_event_generator(request_message: SimpleMessage):
                 language = params.get("language") # Optional: ISO 639-1 language code
 
                 if not audio_content_b64:
-                    # Fallback: Check for file_path (though likely won't work in Render)
-                    audio_path = params.get("file_path")
-                    logger.warning("No se encontró audio_content_base64, intentando usar file_path (puede fallar en Render).")
-                    if not audio_path or not os.path.exists(audio_path):
-                        raise ValueError("No se proporcionó audio_content_base64 ni una ruta de archivo válida.")
-                else:
-                    logger.info("Recibido audio_content_base64. Decodificando...")
-                    try:
-                        audio_bytes = base64.b64decode(audio_content_b64)
-                        logger.info(f"Audio decodificado (bytes: {len(audio_bytes)}). Creando archivo temporal...")
-                    except Exception as decode_err:
-                        logger.error(f"Error al decodificar base64: {decode_err}")
-                        raise ValueError(f"Error al decodificar audio base64: {decode_err}")
-                    
-                    # Create a temporary file to pass to OpenAI API
-                    # Ensure the suffix matches the expected format (e.g., .ogg if that's what Twilio sends)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio_file:
-                         temp_audio_file.write(audio_bytes)
-                         audio_path = temp_audio_file.name
-                         temp_audio_file_created = True
-                    logger.info(f"Contenido de audio guardado temporalmente en: {audio_path}")
+                    raise ValueError("No se proporcionó audio_content_base64.")
+                
+                logger.info("Recibido audio_content_base64. Decodificando...")
+                try:
+                    audio_bytes = base64.b64decode(audio_content_b64)
+                    logger.info(f"Audio decodificado (bytes: {len(audio_bytes)}). Creando archivo OGG temporal...")
+                except Exception as decode_err:
+                    logger.error(f"Error al decodificar base64: {decode_err}")
+                    raise ValueError(f"Error al decodificar audio base64: {decode_err}")
+                
+                # Save original OGG temporarily
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_ogg_file:
+                     temp_ogg_file.write(audio_bytes)
+                     ogg_path = temp_ogg_file.name
+                     temp_ogg_created = True
+                logger.info(f"Contenido de audio OGG guardado temporalmente en: {ogg_path}")
 
-                if not audio_path:
+                # Convert OGG to WAV
+                wav_path = ogg_path.replace(".ogg", ".wav")
+                logger.info(f"Intentando convertir {ogg_path} a {wav_path}...")
+                conversion_success = convert_ogg_to_wav(ogg_path, wav_path)
+
+                if conversion_success:
+                    logger.info(f"Usando archivo WAV convertido para transcripción: {wav_path}")
+                    file_to_transcribe_path = wav_path
+                    file_to_transcribe_name = os.path.basename(wav_path)
+                    temp_wav_created = True # Mark WAV as created for cleanup
+                else:
+                    logger.warning(f"Falló la conversión a WAV. Intentando transcribir el archivo OGG original: {ogg_path}")
+                    file_to_transcribe_path = ogg_path
+                    file_to_transcribe_name = os.path.basename(ogg_path)
+
+                if not file_to_transcribe_path:
                      raise ValueError("No se pudo determinar la ruta del archivo de audio para la transcripción.")
 
-                logger.info(f"Llamando a OpenAI Whisper API (modelo: {model_name}, archivo: {audio_path}, idioma: {language or 'auto'})...")
+                logger.info(f"Llamando a OpenAI Whisper API (modelo: {model_name}, archivo: {file_to_transcribe_path}, idioma: {language or 'auto'})...")
                 
-                # --- ADJUSTMENT FOR FILE FORMAT ISSUE ---
-                # Explicitly provide the filename with the correct extension to the API
-                with open(audio_path, "rb") as audio_file:
+                # Use the file path (WAV if converted, OGG otherwise)
+                with open(file_to_transcribe_path, "rb") as audio_file:
                     # Pass file as a tuple: (filename, file_object)
-                    file_tuple = (os.path.basename(audio_path), audio_file)
+                    file_tuple = (file_to_transcribe_name, audio_file)
                     logger.info(f"Enviando archivo a Whisper API como tupla: {file_tuple[0]}")
                     transcription_response = await openai_client.audio.transcriptions.create(
                         model=model_name,
                         file=file_tuple, # Pass the tuple here
                         language=language # Pass language if provided
                     )
-                # --- END ADJUSTMENT ---
                 response_text = transcription_response.text
                 logger.info(f"Respuesta de OpenAI (Whisper): {response_text[:100]}...")
             
             finally:
-                # Clean up the temporary audio file ONLY if it was created here from base64
-                if temp_audio_file_created and audio_path and os.path.exists(audio_path):
+                # Clean up temporary files
+                if temp_wav_created and wav_path and os.path.exists(wav_path):
                     try:
-                        os.remove(audio_path)
-                        logger.info(f"Archivo temporal de audio (desde base64) eliminado: {audio_path}")
+                        os.remove(wav_path)
+                        logger.info(f"Archivo temporal WAV eliminado: {wav_path}")
                     except OSError as e:
-                        logger.error(f"Error al eliminar archivo temporal de audio {audio_path}: {e}")
+                        logger.error(f"Error al eliminar archivo temporal WAV {wav_path}: {e}")
+                if temp_ogg_created and ogg_path and os.path.exists(ogg_path):
+                    try:
+                        os.remove(ogg_path)
+                        logger.info(f"Archivo temporal OGG eliminado: {ogg_path}")
+                    except OSError as e:
+                        logger.error(f"Error al eliminar archivo temporal OGG {ogg_path}: {e}")
         else:
             # Handle unknown capability explicitly
             logger.warning(f"Capacidad desconocida solicitada: {capability}")
