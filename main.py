@@ -10,6 +10,8 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional
 import logging
+import base64
+import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -44,7 +46,7 @@ app = FastAPI(
 # --- SSE Event Generator ---
 async def openai_event_generator(request_message: SimpleMessage):
     """Generador de eventos SSE para la respuesta de OpenAI (Chat o Whisper)."""
-    logger.info(f"Servidor OpenAI Simplificado recibió: {request_message.model_dump_json()}")
+    logger.info(f"Servidor OpenAI Simplificado recibió: {request_message.model_dump_json(exclude={	'metadata	': {	'parameters	': {	'audio_content_base64	'}}})}") # Exclude base64 from log
 
     capability = request_message.metadata.get("capability", "generate_text") if request_message.metadata else "generate_text"
     response_role = "assistant" # Default role for successful responses
@@ -79,36 +81,38 @@ async def openai_event_generator(request_message: SimpleMessage):
                 raise ValueError("Respuesta inesperada de OpenAI Chat API (sin contenido)")
 
         elif capability == "transcribe_audio":
-            # IMPORTANT: Render's ephemeral filesystem means the path passed from the main backend
-            # might not be accessible here if they are separate services. 
-            # A better approach would be to pass the audio *content* (e.g., base64 encoded)
-            # or upload the file to a shared storage (like S3 or Supabase Storage) and pass the URL.
-            # For now, we keep the path logic but add a warning.
-            audio_path = request_message.metadata.get("parameters", {}).get("file_path") if request_message.metadata else None
-            model_name = request_message.metadata.get("model", "whisper-1")
-            language = request_message.metadata.get("parameters", {}).get("language") if request_message.metadata else None # Optional: ISO 639-1 language code
-
-            logger.warning("La capacidad 'transcribe_audio' asume que la ruta del archivo es accesible por este servidor. Esto puede fallar en Render si son servicios separados.")
-
-            if not audio_path or not os.path.exists(audio_path):
-                # Check if audio content was passed directly (alternative approach)
+            logger.info("Procesando capacidad: transcribe_audio")
+            audio_path = None # Initialize audio_path
+            temp_audio_file_created = False # Flag to track if temp file was created
+            try:
                 audio_content_b64 = request_message.metadata.get("parameters", {}).get("audio_content_base64") if request_message.metadata else None
-                if audio_content_b64:
-                    import base64
-                    import tempfile
-                    logger.info("Recibido contenido de audio en base64, decodificando...")
-                    audio_bytes = base64.b64decode(audio_content_b64)
+                model_name = request_message.metadata.get("model", "whisper-1")
+                language = request_message.metadata.get("parameters", {}).get("language") if request_message.metadata else None # Optional: ISO 639-1 language code
+
+                if not audio_content_b64:
+                    # Fallback: Check for file_path (though likely won't work in Render)
+                    audio_path = request_message.metadata.get("parameters", {}).get("file_path") if request_message.metadata else None
+                    logger.warning("No se encontró audio_content_base64, intentando usar file_path (puede fallar en Render).")
+                    if not audio_path or not os.path.exists(audio_path):
+                        raise ValueError("No se proporcionó audio_content_base64 ni una ruta de archivo válida.")
+                else:
+                    logger.info("Recibido audio_content_base64. Decodificando...")
+                    try:
+                        audio_bytes = base64.b64decode(audio_content_b64)
+                        logger.info(f"Audio decodificado (bytes: {len(audio_bytes)}). Creando archivo temporal...")
+                    except Exception as decode_err:
+                        logger.error(f"Error al decodificar base64: {decode_err}")
+                        raise ValueError(f"Error al decodificar audio base64: {decode_err}")
+                    
                     # Create a temporary file to pass to OpenAI API
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio_file:
                          temp_audio_file.write(audio_bytes)
                          audio_path = temp_audio_file.name
+                         temp_audio_file_created = True
                     logger.info(f"Contenido de audio guardado temporalmente en: {audio_path}")
-                else:
-                    raise ValueError(f"Ruta de archivo de audio no proporcionada, inválida o contenido no encontrado: {audio_path}")
 
-            logger.info(f"Ejecutando capacidad: transcribe_audio con modelo {model_name} para archivo: {audio_path}")
-            
-            try:
+                logger.info(f"Llamando a OpenAI Whisper API (modelo: {model_name}, archivo: {audio_path}, idioma: {language or 'auto'})...")
+                
                 with open(audio_path, "rb") as audio_file:
                     transcription_response = await openai_client.audio.transcriptions.create(
                         model=model_name,
@@ -117,15 +121,15 @@ async def openai_event_generator(request_message: SimpleMessage):
                     )
                 response_text = transcription_response.text
                 logger.info(f"Respuesta de OpenAI (Whisper): {response_text[:100]}...")
+            
             finally:
-                # Clean up the temporary audio file if it was created from base64
-                if 'temp_audio_file' in locals() and os.path.exists(audio_path):
+                # Clean up the temporary audio file ONLY if it was created here from base64
+                if temp_audio_file_created and audio_path and os.path.exists(audio_path):
                     try:
                         os.remove(audio_path)
                         logger.info(f"Archivo temporal de audio (desde base64) eliminado: {audio_path}")
                     except OSError as e:
                         logger.error(f"Error al eliminar archivo temporal de audio {audio_path}: {e}")
-                # Note: If path was passed directly, the *caller* (main backend) should handle cleanup.
         else:
             raise ValueError(f"Capacidad desconocida: {capability}")
 
@@ -143,7 +147,7 @@ async def openai_event_generator(request_message: SimpleMessage):
         logger.exception(f"Error al procesar capacidad 	'{capability}	': {e}") # Use exception for stack trace
         error_msg = SimpleMessage(
             role="error", # Use 'error' role for exceptions
-            content=SimpleTextContent(text=f"Error interno al procesar la solicitud ({capability}): {e}")
+            content=SimpleTextContent(text=f"Error interno al procesar la solicitud ({capability}): {str(e)}")
         )
         yield {"event": "error", "data": error_msg.model_dump_json()}
     finally:
