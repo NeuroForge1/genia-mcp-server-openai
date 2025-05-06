@@ -57,8 +57,7 @@ def convert_ogg_to_wav(input_path: str, output_path: str) -> bool:
             "-ac", "1", # Mono channel
             output_path
         ]
-        # Corrected f-string syntax
-        logger.info(f"Ejecutando comando ffmpeg: {' '.join(command)}") 
+        logger.info(f"Ejecutando comando ffmpeg: {" ".join(command)}") 
         result = subprocess.run(command, check=True, capture_output=True, text=True)
         logger.info(f"Conversión a WAV exitosa: {output_path}")
         logger.debug(f"ffmpeg stdout: {result.stdout}")
@@ -81,7 +80,7 @@ async def openai_event_generator(request_message: SimpleMessage):
     # Log received message excluding potentially large base64 content
     log_safe_metadata = request_message.metadata.copy() if request_message.metadata else {}
     if log_safe_metadata.get("parameters", {}).get("audio_content_base64"):
-        log_safe_metadata["parameters"]["audio_content_base64"] = "<base64_content_omitted>"
+        log_safe_metadata["parameters"]["audio_content_base64"] = f"<base64_content_omitted_length={len(log_safe_metadata['parameters']['audio_content_base64'])}>"
     logger.info(f"Servidor OpenAI Simplificado recibió: role={request_message.role}, content=	'{request_message.content.text[:50]}...'	, metadata={log_safe_metadata}")
 
     # --- CORRECTED CAPABILITY SELECTION --- 
@@ -148,9 +147,11 @@ async def openai_event_generator(request_message: SimpleMessage):
                 if not audio_content_b64:
                     raise ValueError("No se proporcionó audio_content_base64.")
                 
-                logger.info("Recibido audio_content_base64. Decodificando...")
+                # *** ADDED LOGGING FOR BASE64 LENGTH ***
+                logger.info(f"Recibido audio_content_base64 (longitud: {len(audio_content_b64)}). Decodificando...")
                 try:
                     audio_bytes = base64.b64decode(audio_content_b64)
+                    # *** ADDED LOGGING FOR DECODED BYTES SIZE ***
                     logger.info(f"Audio decodificado (bytes: {len(audio_bytes)}). Creando archivo OGG temporal...")
                 except Exception as decode_err:
                     logger.error(f"Error al decodificar base64: {decode_err}")
