@@ -57,7 +57,8 @@ def convert_ogg_to_wav(input_path: str, output_path: str) -> bool:
             "-ac", "1", # Mono channel
             output_path
         ]
-        logger.info(f"Ejecutando comando ffmpeg: {	 	'.join(command)}")
+        # Corrected f-string syntax
+        logger.info(f"Ejecutando comando ffmpeg: {' '.join(command)}") 
         result = subprocess.run(command, check=True, capture_output=True, text=True)
         logger.info(f"Conversión a WAV exitosa: {output_path}")
         logger.debug(f"ffmpeg stdout: {result.stdout}")
@@ -81,7 +82,7 @@ async def openai_event_generator(request_message: SimpleMessage):
     log_safe_metadata = request_message.metadata.copy() if request_message.metadata else {}
     if log_safe_metadata.get("parameters", {}).get("audio_content_base64"):
         log_safe_metadata["parameters"]["audio_content_base64"] = "<base64_content_omitted>"
-    logger.info(f"Servidor OpenAI Simplificado recibió: role={request_message.role}, content=	'{request_message.content.text[:50]}...	', metadata={log_safe_metadata}")
+    logger.info(f"Servidor OpenAI Simplificado recibió: role={request_message.role}, content=	'{request_message.content.text[:50]}...'	, metadata={log_safe_metadata}")
 
     # --- CORRECTED CAPABILITY SELECTION --- 
     capability = "generate_text" # Default capability
