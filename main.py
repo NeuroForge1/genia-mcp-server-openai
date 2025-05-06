@@ -53,7 +53,6 @@ async def openai_event_generator(request_message: SimpleMessage):
     logger.info(f"Servidor OpenAI Simplificado recibió: role={request_message.role}, content=	'{request_message.content.text[:50]}...	', metadata={log_safe_metadata}")
 
     # --- CORRECTED CAPABILITY SELECTION --- 
-    # Check for capability in metadata, prioritizing 'capability_name' if present (as sent by backend)
     capability = "generate_text" # Default capability
     if request_message.metadata:
         if "capability_name" in request_message.metadata:
@@ -136,15 +135,20 @@ async def openai_event_generator(request_message: SimpleMessage):
                 if not audio_path:
                      raise ValueError("No se pudo determinar la ruta del archivo de audio para la transcripción.")
 
-                logger.info(f"Llamando a OpenAI Whisper API (modelo: {model_name}, archivo: {audio_path}, idioma: {language or 	'auto	'})...")
+                logger.info(f"Llamando a OpenAI Whisper API (modelo: {model_name}, archivo: {audio_path}, idioma: {language or 'auto'})...")
                 
-                # Use the file path (either original or temporary)
+                # --- ADJUSTMENT FOR FILE FORMAT ISSUE ---
+                # Explicitly provide the filename with the correct extension to the API
                 with open(audio_path, "rb") as audio_file:
+                    # Pass file as a tuple: (filename, file_object)
+                    file_tuple = (os.path.basename(audio_path), audio_file)
+                    logger.info(f"Enviando archivo a Whisper API como tupla: {file_tuple[0]}")
                     transcription_response = await openai_client.audio.transcriptions.create(
                         model=model_name,
-                        file=audio_file,
+                        file=file_tuple, # Pass the tuple here
                         language=language # Pass language if provided
                     )
+                # --- END ADJUSTMENT ---
                 response_text = transcription_response.text
                 logger.info(f"Respuesta de OpenAI (Whisper): {response_text[:100]}...")
             
@@ -172,7 +176,7 @@ async def openai_event_generator(request_message: SimpleMessage):
         logger.info("Respuesta enviada por SSE.")
 
     except Exception as e:
-        logger.exception(f"Error al procesar capacidad 	'{capability}	': {e}") # Use exception for stack trace
+        logger.exception(f"Error al procesar capacidad '{capability}': {e}") # Use exception for stack trace
         error_msg = SimpleMessage(
             role="error", # Use 'error' role for exceptions
             content=SimpleTextContent(text=f"Error interno al procesar la solicitud ({capability}): {str(e)}")
