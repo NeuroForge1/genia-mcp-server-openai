@@ -46,9 +46,28 @@ app = FastAPI(
 # --- SSE Event Generator ---
 async def openai_event_generator(request_message: SimpleMessage):
     """Generador de eventos SSE para la respuesta de OpenAI (Chat o Whisper)."""
-    logger.info(f"Servidor OpenAI Simplificado recibió: {request_message.model_dump_json(exclude={	'metadata	': {	'parameters	': {	'audio_content_base64	'}}})}") # Exclude base64 from log
+    # Log received message excluding potentially large base64 content
+    log_safe_metadata = request_message.metadata.copy() if request_message.metadata else {}
+    if log_safe_metadata.get("parameters", {}).get("audio_content_base64"):
+        log_safe_metadata["parameters"]["audio_content_base64"] = "<base64_content_omitted>"
+    logger.info(f"Servidor OpenAI Simplificado recibió: role={request_message.role}, content=	'{request_message.content.text[:50]}...	', metadata={log_safe_metadata}")
 
-    capability = request_message.metadata.get("capability", "generate_text") if request_message.metadata else "generate_text"
+    # --- CORRECTED CAPABILITY SELECTION --- 
+    # Check for capability in metadata, prioritizing 'capability_name' if present (as sent by backend)
+    capability = "generate_text" # Default capability
+    if request_message.metadata:
+        if "capability_name" in request_message.metadata:
+            capability = request_message.metadata["capability_name"]
+            logger.info(f"Capability identified from metadata.capability_name: {capability}")
+        elif "capability" in request_message.metadata:
+            capability = request_message.metadata["capability"]
+            logger.info(f"Capability identified from metadata.capability: {capability}")
+        else:
+            logger.info("No capability specified in metadata, defaulting to generate_text")
+    else:
+        logger.info("No metadata provided, defaulting to generate_text")
+    # --- END CORRECTION ---
+
     response_role = "assistant" # Default role for successful responses
 
     if not openai_client:
@@ -85,13 +104,15 @@ async def openai_event_generator(request_message: SimpleMessage):
             audio_path = None # Initialize audio_path
             temp_audio_file_created = False # Flag to track if temp file was created
             try:
-                audio_content_b64 = request_message.metadata.get("parameters", {}).get("audio_content_base64") if request_message.metadata else None
-                model_name = request_message.metadata.get("model", "whisper-1")
-                language = request_message.metadata.get("parameters", {}).get("language") if request_message.metadata else None # Optional: ISO 639-1 language code
+                # Get parameters safely
+                params = request_message.metadata.get("parameters", {}) if request_message.metadata else {}
+                audio_content_b64 = params.get("audio_content_base64")
+                model_name = request_message.metadata.get("model", "whisper-1") if request_message.metadata else "whisper-1"
+                language = params.get("language") # Optional: ISO 639-1 language code
 
                 if not audio_content_b64:
                     # Fallback: Check for file_path (though likely won't work in Render)
-                    audio_path = request_message.metadata.get("parameters", {}).get("file_path") if request_message.metadata else None
+                    audio_path = params.get("file_path")
                     logger.warning("No se encontró audio_content_base64, intentando usar file_path (puede fallar en Render).")
                     if not audio_path or not os.path.exists(audio_path):
                         raise ValueError("No se proporcionó audio_content_base64 ni una ruta de archivo válida.")
@@ -105,14 +126,19 @@ async def openai_event_generator(request_message: SimpleMessage):
                         raise ValueError(f"Error al decodificar audio base64: {decode_err}")
                     
                     # Create a temporary file to pass to OpenAI API
+                    # Ensure the suffix matches the expected format (e.g., .ogg if that's what Twilio sends)
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_audio_file:
                          temp_audio_file.write(audio_bytes)
                          audio_path = temp_audio_file.name
                          temp_audio_file_created = True
                     logger.info(f"Contenido de audio guardado temporalmente en: {audio_path}")
 
-                logger.info(f"Llamando a OpenAI Whisper API (modelo: {model_name}, archivo: {audio_path}, idioma: {language or 'auto'})...")
+                if not audio_path:
+                     raise ValueError("No se pudo determinar la ruta del archivo de audio para la transcripción.")
+
+                logger.info(f"Llamando a OpenAI Whisper API (modelo: {model_name}, archivo: {audio_path}, idioma: {language or 	'auto	'})...")
                 
+                # Use the file path (either original or temporary)
                 with open(audio_path, "rb") as audio_file:
                     transcription_response = await openai_client.audio.transcriptions.create(
                         model=model_name,
@@ -131,6 +157,8 @@ async def openai_event_generator(request_message: SimpleMessage):
                     except OSError as e:
                         logger.error(f"Error al eliminar archivo temporal de audio {audio_path}: {e}")
         else:
+            # Handle unknown capability explicitly
+            logger.warning(f"Capacidad desconocida solicitada: {capability}")
             raise ValueError(f"Capacidad desconocida: {capability}")
 
         # Crear mensaje de respuesta simplificado
