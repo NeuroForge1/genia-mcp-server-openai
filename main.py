@@ -58,7 +58,7 @@ def convert_ogg_to_wav(input_path: str, output_path: str) -> bool:
             output_path
         ]
         # *** CORRECTED F-STRING SYNTAX ***
-        logger.info(f"Ejecutando comando ffmpeg: {" ".join(command)}") 
+        logger.info(f"Ejecutando comando ffmpeg: {' '.join(command)}") 
         result = subprocess.run(command, check=True, capture_output=True, text=True)
         logger.info(f"Conversión a WAV exitosa: {output_path}")
         logger.debug(f"ffmpeg stdout: {result.stdout}")
