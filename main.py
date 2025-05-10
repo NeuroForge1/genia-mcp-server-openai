@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional
+import copy # Para deepcopy
 import logging
 import base64
 import tempfile
@@ -79,11 +80,11 @@ def convert_ogg_to_wav(input_path: str, output_path: str) -> bool:
 async def openai_event_generator(request_message: SimpleMessage):
     """Generador de eventos SSE para la respuesta de OpenAI (Chat o Whisper)."""
     # Log received message excluding potentially large base64 content
-    log_safe_metadata = request_message.metadata.copy() if request_message.metadata else {}
-    if log_safe_metadata.get("parameters", {}).get("audio_content_base64"):
-        audio_len = len(log_safe_metadata["parameters"]["audio_content_base64"])
-        log_safe_metadata["parameters"]["audio_content_base64"] = f"<base64_content_omitted_length={audio_len}>"
-    logger.info(f"Servidor OpenAI Simplificado recibió: role={request_message.role}, content=	'{request_message.content.text[:50]}...'	, metadata={log_safe_metadata}")
+    log_safe_request_message = copy.deepcopy(request_message) # Crear una copia profunda para el log
+    if log_safe_request_message.metadata and log_safe_request_message.metadata.get("parameters", {}).get("audio_content_base64"):
+        audio_len = len(log_safe_request_message.metadata["parameters"]["audio_content_base64"])
+        log_safe_request_message.metadata["parameters"]["audio_content_base64"] = f"<base64_content_omitted_length={audio_len}>"
+    logger.info(f"Servidor OpenAI Simplificado recibió: role={log_safe_request_message.role}, content=	'{log_safe_request_message.content.text[:50]}...	', metadata={log_safe_request_message.metadata}")
 
     # --- CORRECTED CAPABILITY SELECTION --- 
     capability = "generate_text" # Default capability
